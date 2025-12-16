@@ -6,7 +6,14 @@ from pathlib import Path
 import sqlite3
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
+)
 
 try:
     from config import TELEGRAM_BOT_TOKEN, LIMITES, MENSAGENS, CATEGORIAS_CLINICAS
@@ -19,14 +26,13 @@ except ImportError as e:
     exit(1)
 
 # ============================================
-# 🔒 CONFIGURAÇÃO DE ACESSO
+# 🔒 CONTROLE DE ACESSO PRIVADO
 # ============================================
 
 raw_ids = os.getenv("TELEGRAM_ALLOWED_IDS", "")
 ALLOWED_IDS = {int(i.strip()) for i in raw_ids.split(",") if i.strip()}
 
 def usuario_autorizado(user_id: int) -> bool:
-    """Verifica se o usuário está autorizado"""
     return user_id in ALLOWED_IDS
 
 # ============================================
@@ -34,10 +40,9 @@ def usuario_autorizado(user_id: int) -> bool:
 # ============================================
 
 def criar_tabela_tags():
-    """Cria tabela de tags (executar uma vez)"""
-    conn = sqlite3.connect('lince_transcricoes.db')
+    conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             transcricao_id INTEGER,
@@ -45,32 +50,30 @@ def criar_tabela_tags():
             data_criacao TEXT,
             FOREIGN KEY (transcricao_id) REFERENCES transcricoes(id)
         )
-    ''')
+    """)
     conn.commit()
     conn.close()
-    print("✅ Tabela de tags criada/verificada")
 
 async def adicionar_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Adiciona tag à última transcrição"""
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        await update.message.reply_text("⛔ Acesso negado.")
         return
 
-    tag = ' '.join(context.args).strip()
-
+    tag = " ".join(context.args).strip()
     if not tag:
         await update.message.reply_text("❌ Use: /tag nome_da_tag")
         return
 
-    conn = sqlite3.connect('lince_transcricoes.db')
+    conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id FROM transcricoes
+
+    cursor.execute("""
+        SELECT id
+        FROM transcricoes
         WHERE telegram_user_id = ?
         ORDER BY criado_em DESC
         LIMIT 1
-    ''', (update.effective_user.id,))
-
+    """, (update.effective_user.id,))
     resultado = cursor.fetchone()
 
     if not resultado:
@@ -78,380 +81,276 @@ async def adicionar_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         return
 
-    transcricao_id = resultado[0]
+    tid = resultado[0]
 
-    cursor.execute('''
+    cursor.execute("""
         INSERT INTO tags (transcricao_id, tag, data_criacao)
         VALUES (?, ?, ?)
-    ''', (transcricao_id, tag, datetime.now().isoformat()))
+    """, (tid, tag, datetime.now().isoformat()))
 
     conn.commit()
     conn.close()
-
     await update.message.reply_text(f"✅ Tag '{tag}' adicionada à última transcrição!")
 
 async def listar_por_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista todas as transcrições com uma tag específica"""
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        await update.message.reply_text("⛔ Acesso negado.")
         return
 
-    tag = ' '.join(context.args).strip()
-
+    tag = " ".join(context.args).strip()
     if not tag:
         await update.message.reply_text("❌ Use: /listar nome_da_tag")
         return
 
-    conn = sqlite3.connect('lince_transcricoes.db')
+    conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("""
         SELECT t.id, t.transcricao_formatada, t.criado_em
         FROM transcricoes t
         INNER JOIN tags tg ON t.id = tg.transcricao_id
         WHERE tg.tag = ? AND t.telegram_user_id = ?
         ORDER BY t.criado_em DESC
-    ''', (tag, update.effective_user.id))
-
+    """, (tag, update.effective_user.id))
     resultados = cursor.fetchall()
     conn.close()
 
     if not resultados:
-        await update.message.reply_text(f"❌ Nenhuma transcrição encontrada com a tag '{tag}'.")
+        await update.message.reply_text(f"❌ Nenhum registro com tag '{tag}'.")
         return
 
     resposta = f"📋 *Transcrições com tag '{tag}':*\n\n"
     botoes = []
 
-    for i, (tid, texto, data) in enumerate(resultados[:10], 1):
-        # Preview de 75 caracteres, limpo de caracteres especiais
+    for i, (tid, texto, data) in enumerate(resultados, start=1):
         preview = (
             texto[:75]
-            .replace('\n', ' ')
-            .replace('*', '')
-            .replace('_', '')
-            .replace('[', '')
-            .replace(']', '')
+            .replace("\n", " ")
+            .replace("*", "")
+            .replace("_", "")
+            .replace("[", "")
+            .replace("]", "")
             .strip()
             + "..."
         )
-
         resposta += f"*{i}. ID {tid}* | {data}\n{preview}\n\n"
+        botoes.append([InlineKeyboardButton(f"📍 Ver transcrição {i}", callback_data=f"view_{tid}")])
 
-        # Botão para ver transcrição completa
-        botoes.append([InlineKeyboardButton(f"📍 {i}. Ver transcrição completa", callback_data=f"view_{tid}")])
-
-    # Botão para fechar
     botoes.append([InlineKeyboardButton("◀️ Fechar", callback_data="voltar")])
 
     await update.message.reply_text(
         resposta,
-        reply_markup=InlineKeyboardMarkup(botoes),
-        parse_mode='Markdown'
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(botoes)
     )
 
 async def listar_todas_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista todas as tags disponíveis"""
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        await update.message.reply_text("⛔ Acesso negado.")
         return
 
-    conn = sqlite3.connect('lince_transcricoes.db')
+    conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT DISTINCT tag, COUNT(*) as quantidade
+    cursor.execute("""
+        SELECT tag, COUNT(*)
         FROM tags
         GROUP BY tag
-        ORDER BY quantidade DESC
-    ''')
-
-    resultados = cursor.fetchall()
+        ORDER BY COUNT(*) DESC
+    """)
+    dados = cursor.fetchall()
     conn.close()
 
-    if not resultados:
-        await update.message.reply_text("❌ Nenhuma tag criada ainda.")
+    if not dados:
+        await update.message.reply_text("❌ Nenhuma tag cadastrada.")
         return
 
-    resposta = "🏷️ *Tags disponíveis:*\n\n"
-    for tag, qtd in resultados:
-        resposta += f"• `{tag}` ({qtd} transcrição{'s' if qtd > 1 else ''})\n"
+    texto = "🏷️ *Tags disponíveis:*\n\n"
+    for tag, qtd in dados:
+        texto += f"• `{tag}` ({qtd})\n"
 
-    await update.message.reply_text(resposta, parse_mode='Markdown')
+    await update.message.reply_text(texto, parse_mode="Markdown")
 
 # ============================================
-# CONFIGURAÇÃO DE LOGGING E BANCO
+# LOG & DATABASE
 # ============================================
 
 Path("logs").mkdir(exist_ok=True)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.FileHandler('logs/lince_bot.log'), logging.StreamHandler()])
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("logs/lince_bot.log"), logging.StreamHandler()],
+)
 logger = logging.getLogger(__name__)
 
 try:
     db = DatabaseManager()
 except Exception as e:
-    logger.error(f"Erro BD: {e}")
+    logger.error(f"Erro ao iniciar BD: {e}")
     exit(1)
 
 # ============================================
-# HANDLERS EXISTENTES (COM VERIFICAÇÃO DE ACESSO)
+# FUNÇÕES DO BOT
 # ============================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context):
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        await update.message.reply_text("⛔ Acesso negado.")
         return
-    await update.message.reply_text(MENSAGENS["start"], parse_mode='Markdown')
+    await update.message.reply_text(MENSAGENS["start"], parse_mode="Markdown")
 
-async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ajuda(update: Update, context):
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        await update.message.reply_text("⛔ Acesso negado.")
         return
-    await update.message.reply_text(MENSAGENS["ajuda"], parse_mode='Markdown')
+    await update.message.reply_text(MENSAGENS["ajuda"], parse_mode="Markdown")
 
-async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def processar_audio(update: Update, context):
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        await update.message.reply_text("⛔ Acesso negado.")
         return
 
     audio_path = None
     try:
         if update.message.voice:
             audio_obj = update.message.voice
-            file_id = audio_obj.file_id
-            duracao = audio_obj.duration
             extensao = ".ogg"
-        elif update.message.audio:
-            audio_obj = update.message.audio
-            file_id = audio_obj.file_id
-            duracao = audio_obj.duration
-            extensao = ".mp3"
         else:
-            await update.message.reply_text("Envie um áudio")
+            await update.message.reply_text("Envie um áudio.")
             return
 
-        if duracao > LIMITES["max_duracao_audio"]:
-            await update.message.reply_text(f"Áudio muito longo ({duracao}s)")
+        file_id = audio_obj.file_id
+        duration = audio_obj.duration
+
+        if duration > LIMITES["max_duracao_audio"]:
+            await update.message.reply_text("⛔ Áudio muito longo.")
             return
 
         msg = await update.message.reply_text("Baixando áudio...")
-        audio_file = await context.bot.get_file(file_id)
+        arquivo = await context.bot.get_file(file_id)
 
         with tempfile.NamedTemporaryFile(suffix=extensao, delete=False) as tmp:
             audio_path = tmp.name
-
-        await audio_file.download_to_drive(audio_path)
-
-        if not validar_audio(audio_path, LIMITES["max_tamanho_arquivo"]):
-            await msg.edit_text("Arquivo inválido")
-            os.remove(audio_path)
-            return
+        await arquivo.download_to_drive(audio_path)
 
         await msg.edit_text("Transcrevendo...")
-        transcricao_raw = transcrever_audio_groq(audio_path)
+        texto_raw = transcrever_audio_groq(audio_path)
 
-        if not transcricao_raw or len(transcricao_raw.strip()) < 10:
-            await msg.edit_text("Transcrição vazia")
-            os.remove(audio_path)
-            return
+        texto_fmt = aplicar_pós_processamento(texto_raw)
+        tipo_doc = detectar_tipo_documento(texto_fmt)
+        categorias = classificar_categoria_clinica(texto_fmt)
 
-        transcricao = aplicar_pós_processamento(transcricao_raw)
-        tipo = detectar_tipo_documento(transcricao)
-        categorias = classificar_categoria_clinica(transcricao)
+        tid = db.salvar_transcricao(
+            update.message.message_id,
+            update.message.from_user.id,
+            file_id,
+            duration,
+            texto_raw,
+            texto_fmt,
+            tipo_doc,
+            categorias
+        )
 
-        # Formatar texto SEM as categorias no topo
-        txt_fmt = f"Lince, iniciar transcrição\n{transcricao}\nLince, parar transcrição"
-
-        tid = db.salvar_transcricao(update.message.message_id, update.message.from_user.id, file_id, duracao, transcricao_raw, txt_fmt, tipo, categorias)
-
-        # ============================================
-        # CRIAR BOTÕES CLICÁVEIS PARA CATEGORIAS
-        # ============================================
         botoes = []
 
-        # Linha 1: Botões de categorias (máximo 3 por linha)
-        linha_categorias = []
+        cat_line = []
         for cat in categorias:
-            # Sanitizar nome da categoria para callback_data
-            cat_sanitizado = cat.replace(" ", "_")
-            linha_categorias.append(InlineKeyboardButton(f"🏷️ {cat}", callback_data=f"cat_{cat_sanitizado}"))
-            if len(linha_categorias) == 3:
-                botoes.append(linha_categorias)
-                linha_categorias = []
+            cat_sanit = cat.replace(" ", "_")
+            cat_line.append(InlineKeyboardButton(f"🏷️ {cat}", callback_data=f"cat_{cat_sanit}"))
 
-        # Adicionar categorias restantes
-        if linha_categorias:
-            botoes.append(linha_categorias)
+        if cat_line:
+            botoes.append(cat_line)
 
-        # Linha final: Botão "Ver texto completo"
         botoes.append([InlineKeyboardButton("📄 Ver texto completo", callback_data=f"view_{tid}")])
-
-        kb = InlineKeyboardMarkup(botoes)
 
         await msg.delete()
 
-        # Mensagem formatada
-        prev = (txt_fmt[:200] + "...") if len(txt_fmt) > 200 else txt_fmt
-        mensagem = f"✅ *Transcrição concluída*\n\n📋 Tipo: `{tipo}`\n🆔 ID: `{tid}`\n\n{prev}"
-
-        await update.message.reply_text(mensagem, reply_markup=kb, parse_mode='Markdown')
-
-        os.remove(audio_path)
+        await update.message.reply_text(
+            f"✅ *Transcrição concluída*\n\n🆔 ID `{tid}`\n📋 Tipo: `{tipo_doc}`\n\n{texto_fmt[:250]}...",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(botoes)
+        )
 
     except Exception as e:
-        logger.error(f"Erro: {e}")
-        await update.message.reply_text("Erro ao processar")
+        logger.error(f"Erro processando áudio: {e}")
+        await update.message.reply_text("Erro ao processar o áudio.")
+
+    finally:
         if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
 
-async def ultimas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
-        return
-
-    resultados = db.buscar_ultimas(limite=5)
-    if not resultados:
-        await update.message.reply_text("Nenhuma transcrição")
-        return
-    msg = "Últimas 5:\n\n"
-    for r in resultados:
-        msg += f"ID {r['id']} | {r['tipo_documento']}\n"
-    await update.message.reply_text(msg)
-
-async def categorias_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
-        return
-
-    msg = "Categorias:\n" + "\n".join([f"• {c}" for c in CATEGORIAS_CLINICAS.keys()])
-    await update.message.reply_text(msg)
-
-# ============================================
-# HANDLER PARA CLIQUES NAS CATEGORIAS
-# ============================================
-
-async def listar_por_categoria(update: Update, context: ContextTypes.DEFAULT_TYPE, categoria: str):
-    """Lista todas as transcrições de uma categoria específica"""
+async def listar_por_categoria(update: Update, context, categoria: str):
     query = update.callback_query
 
-    if not usuario_autorizado(query.from_user.id):
-        await query.answer("⛔ Acesso negado", show_alert=True)
-        return
-
-    conn = sqlite3.connect('lince_transcricoes.db')
+    conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
-
-    # Buscar todas as transcrições do usuário
-    cursor.execute('''
+    cursor.execute("""
         SELECT id, tipo_documento, criado_em, transcricao_formatada, categorias
         FROM transcricoes
         WHERE telegram_user_id = ?
         ORDER BY criado_em DESC
-    ''', (query.from_user.id,))
-
+    """, (query.from_user.id,))
     todas = cursor.fetchall()
     conn.close()
 
-    # Filtrar manualmente as que contêm a categoria
     resultados = []
     for tid, tipo, data, texto, cats in todas:
         if cats and categoria.lower() in cats.lower():
             resultados.append((tid, tipo, data, texto))
 
     if not resultados:
-        await query.answer(f"❌ Nenhuma transcrição encontrada na categoria '{categoria}'", show_alert=True)
+        await query.answer("❌ Nenhum registro nesta categoria.", show_alert=True)
         return
 
-    resposta = f"🏷️ *Categoria: {categoria}*\n\n"
+    texto_msg = f"🏷️ *Categoria: {categoria}*\n\n"
     botoes = []
 
-    for i, (tid, tipo, data, texto) in enumerate(resultados[:10], 1):
-        # Preview de 75 caracteres, limpo de caracteres especiais
-        preview = (
-            texto[:75]
-            .replace('\n', ' ')
-            .replace('*', '')
-            .replace('_', '')
-            .replace('[', '')
-            .replace(']', '')
-            .strip()
-            + "..."
-        )
+    for i, (tid, tipo, data, texto) in enumerate(resultados, start=1):
+        preview = texto[:75].replace("\n", " ").strip() + "..."
+        texto_msg += f"*{i}. ID {tid}* | {tipo}\n📅 {data}\n{preview}\n\n"
+        botoes.append([InlineKeyboardButton(f"📍 Ver transcrição {i}", callback_data=f"view_{tid}")])
 
-        resposta += f"*{i}. ID {tid}* | {tipo}\n📅 {data}\n{preview}\n\n"
-
-        # Botão para ver transcrição completa
-        botoes.append([InlineKeyboardButton(f"📍 {i}. Ver transcrição completa", callback_data=f"view_{tid}")])
-
-    # Botão para fechar
     botoes.append([InlineKeyboardButton("◀️ Fechar", callback_data="voltar")])
 
-    await query.message.reply_text(
-        resposta,
-        reply_markup=InlineKeyboardMarkup(botoes),
-        parse_mode='Markdown'
-    )
+    await query.message.reply_text(texto_msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(botoes))
     await query.answer()
 
-# ============================================
-# HANDLER DE CALLBACKS (BOTÕES CLICÁVEIS)
-# ============================================
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+async def button_callback(update: Update, context):
+    query = update.callback_query  # ✅ CORRIGIDO
     await query.answer()
 
-    # Ver texto completo
     if query.data.startswith("view_"):
         tid = int(query.data.split("_")[1])
-        trans = db.buscar_por_id(tid)
-        if trans:
+        registro = db.buscar_por_id(tid)
+        if registro:
+            texto = registro["transcricao_formatada"]
             await query.message.reply_text(
-                f"📄 *Texto completo (ID {tid}):*\n\n{trans['transcricao_formatada'][:4000]}",
-                parse_mode='Markdown'
+                f"📄 *Transcrição completa (ID {tid}):*\n\n{texto[:4000]}",
+                parse_mode="Markdown"
             )
 
-    # Listar por categoria
     elif query.data.startswith("cat_"):
         categoria = query.data.replace("cat_", "").replace("_", " ")
         await listar_por_categoria(update, context, categoria)
 
-    # Voltar (apenas fecha a mensagem)
     elif query.data == "voltar":
         await query.message.delete()
 
 # ============================================
-# FUNÇÃO MAIN
+# MAIN
 # ============================================
 
 def main():
-    if not TELEGRAM_BOT_TOKEN:
-        print("TELEGRAM_BOT_TOKEN não configurado")
-        return
-
-    # Criar tabela de tags
     criar_tabela_tags()
-    print(f"✅ Bot iniciado com restrição de acesso")
-    print(f"✅ IDs autorizados: {ALLOWED_IDS}")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Handlers de comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ajuda", ajuda))
-    app.add_handler(CommandHandler("ultimas", ultimas))
-    app.add_handler(CommandHandler("categorias", categorias_cmd))
-
-    # Handlers de tags
     app.add_handler(CommandHandler("tag", adicionar_tag))
     app.add_handler(CommandHandler("listar", listar_por_tag))
     app.add_handler(CommandHandler("tags", listar_todas_tags))
-
-    # Handler de áudio
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, processar_audio))
-
-    # Handler de callbacks (botões clicáveis)
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("Bot iniciado")
     app.run_polling()
 
 if __name__ == "__main__":
