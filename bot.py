@@ -65,9 +65,9 @@ async def adicionar_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('lince_transcricoes.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id FROM transcricoes 
-        WHERE user_id = ? 
-        ORDER BY data_criacao DESC 
+        SELECT id FROM transcricoes
+        WHERE telegram_user_id = ?
+        ORDER BY criado_em DESC
         LIMIT 1
     ''', (update.effective_user.id,))
 
@@ -105,11 +105,11 @@ async def listar_por_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('lince_transcricoes.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT t.transcricao_formatada, t.data_criacao
+        SELECT t.transcricao_formatada, t.criado_em
         FROM transcricoes t
         INNER JOIN tags tg ON t.id = tg.transcricao_id
-        WHERE tg.tag = ? AND t.user_id = ?
-        ORDER BY t.data_criacao DESC
+        WHERE tg.tag = ? AND t.telegram_user_id = ?
+        ORDER BY t.criado_em DESC
     ''', (tag, update.effective_user.id))
 
     resultados = cursor.fetchall()
@@ -317,17 +317,22 @@ async def listar_por_categoria(update: Update, context: ContextTypes.DEFAULT_TYP
     conn = sqlite3.connect('lince_transcricoes.db')
     cursor = conn.cursor()
 
-    # Buscar transcrições que contenham a categoria
+    # Buscar todas as transcrições do usuário
     cursor.execute('''
-        SELECT id, tipo_documento, data_criacao, transcricao_formatada
+        SELECT id, tipo_documento, criado_em, transcricao_formatada, categorias
         FROM transcricoes
-        WHERE user_id = ? AND categorias_clinicas LIKE ?
-        ORDER BY data_criacao DESC
-        LIMIT 10
-    ''', (query.from_user.id, f'%{categoria}%'))
+        WHERE telegram_user_id = ?
+        ORDER BY criado_em DESC
+    ''', (query.from_user.id,))
 
-    resultados = cursor.fetchall()
+    todas = cursor.fetchall()
     conn.close()
+
+    # Filtrar manualmente as que contêm a categoria
+    resultados = []
+    for tid, tipo, data, texto, cats in todas:
+        if cats and categoria.lower() in cats.lower():
+            resultados.append((tid, tipo, data, texto))
 
     if not resultados:
         await query.answer(f"❌ Nenhuma transcrição encontrada na categoria '{categoria}'", show_alert=True)
@@ -335,8 +340,9 @@ async def listar_por_categoria(update: Update, context: ContextTypes.DEFAULT_TYP
 
     resposta = f"🏷️ *Categoria: {categoria}*\n\n"
 
-    for i, (tid, tipo, data, texto) in enumerate(resultados, 1):
-        preview = texto[:100].replace('\n', ' ') + "..."
+    for i, (tid, tipo, data, texto) in enumerate(resultados[:10], 1):
+        # Remover caracteres especiais do Markdown para evitar erros
+        preview = texto[:100].replace('\n', ' ').replace('*', '').replace('_', '').replace('[', '').replace(']', '') + "..."
         resposta += f"*{i}. ID {tid}* | {tipo}\n📅 {data}\n{preview}\n\n"
 
     # Botão para voltar
