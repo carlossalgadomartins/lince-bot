@@ -235,15 +235,42 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tipo = detectar_tipo_documento(transcricao)
         categorias = classificar_categoria_clinica(transcricao)
 
-        txt_fmt = f"[TIPO: {tipo}]\n[CATEGORIAS: {', '.join(categorias)}]\n\nLince, iniciar transcrição\n{transcricao}\nLince, parar transcrição"
+        # Formatar texto SEM as categorias no topo
+        txt_fmt = f"Lince, iniciar transcrição\n{transcricao}\nLince, parar transcrição"
 
         tid = db.salvar_transcricao(update.message.message_id, update.message.from_user.id, file_id, duracao, transcricao_raw, txt_fmt, tipo, categorias)
 
-        kb = [[InlineKeyboardButton("Ver texto", callback_data=f"view_{tid}")]]
+        # ============================================
+        # CRIAR BOTÕES CLICÁVEIS PARA CATEGORIAS
+        # ============================================
+        botoes = []
+
+        # Linha 1: Botões de categorias (máximo 3 por linha)
+        linha_categorias = []
+        for cat in categorias:
+            # Sanitizar nome da categoria para callback_data
+            cat_sanitizado = cat.replace(" ", "_")
+            linha_categorias.append(InlineKeyboardButton(f"🏷️ {cat}", callback_data=f"cat_{cat_sanitizado}"))
+            if len(linha_categorias) == 3:
+                botoes.append(linha_categorias)
+                linha_categorias = []
+
+        # Adicionar categorias restantes
+        if linha_categorias:
+            botoes.append(linha_categorias)
+
+        # Linha final: Botão "Ver texto completo"
+        botoes.append([InlineKeyboardButton("📄 Ver texto completo", callback_data=f"view_{tid}")])
+
+        kb = InlineKeyboardMarkup(botoes)
+
         await msg.delete()
 
-        prev = (txt_fmt[:250] + "...") if len(txt_fmt) > 250 else txt_fmt
-        await update.message.reply_text(f"Transcrição OK\nTipo: {tipo}\nCategorias: {', '.join(categorias)}\nID: {tid}\n\n{prev}", reply_markup=InlineKeyboardMarkup(kb))
+        # Mensagem formatada
+        prev = (txt_fmt[:200] + "...") if len(txt_fmt) > 200 else txt_fmt
+        mensagem = f"✅ *Transcrição concluída*\n\n📋 Tipo: `{tipo}`\n🆔 ID: `{tid}`\n\n{prev}"
+
+        await update.message.reply_text(mensagem, reply_markup=kb, parse_mode='Markdown')
 
         os.remove(audio_path)
 
@@ -275,14 +302,76 @@ async def categorias_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "Categorias:\n" + "\n".join([f"• {c}" for c in CATEGORIAS_CLINICAS.keys()])
     await update.message.reply_text(msg)
 
+# ============================================
+# HANDLER PARA CLIQUES NAS CATEGORIAS
+# ============================================
+
+async def listar_por_categoria(update: Update, context: ContextTypes.DEFAULT_TYPE, categoria: str):
+    """Lista todas as transcrições de uma categoria específica"""
+    query = update.callback_query
+
+    if not usuario_autorizado(query.from_user.id):
+        await query.answer("⛔ Acesso negado", show_alert=True)
+        return
+
+    conn = sqlite3.connect('lince_transcricoes.db')
+    cursor = conn.cursor()
+
+    # Buscar transcrições que contenham a categoria
+    cursor.execute('''
+        SELECT id, tipo_documento, data_criacao, transcricao_formatada
+        FROM transcricoes
+        WHERE user_id = ? AND categorias_clinicas LIKE ?
+        ORDER BY data_criacao DESC
+        LIMIT 10
+    ''', (query.from_user.id, f'%{categoria}%'))
+
+    resultados = cursor.fetchall()
+    conn.close()
+
+    if not resultados:
+        await query.answer(f"❌ Nenhuma transcrição encontrada na categoria '{categoria}'", show_alert=True)
+        return
+
+    resposta = f"🏷️ *Categoria: {categoria}*\n\n"
+
+    for i, (tid, tipo, data, texto) in enumerate(resultados, 1):
+        preview = texto[:100].replace('\n', ' ') + "..."
+        resposta += f"*{i}. ID {tid}* | {tipo}\n📅 {data}\n{preview}\n\n"
+
+    # Botão para voltar
+    kb = [[InlineKeyboardButton("◀️ Voltar", callback_data="voltar")]]
+
+    await query.message.reply_text(resposta, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    await query.answer()
+
+# ============================================
+# HANDLER DE CALLBACKS (BOTÕES CLICÁVEIS)
+# ============================================
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # Ver texto completo
     if query.data.startswith("view_"):
         tid = int(query.data.split("_")[1])
         trans = db.buscar_por_id(tid)
         if trans:
-            await query.message.reply_text(f"Texto:\n\n{trans['transcricao_formatada'][:4000]}")
+            await query.message.reply_text(f"📄 *Texto completo (ID {tid}):*\n\n{trans['transcricao_formatada'][:4000]}", parse_mode='Markdown')
+
+    # Listar por categoria
+    elif query.data.startswith("cat_"):
+        categoria = query.data.replace("cat_", "").replace("_", " ")
+        await listar_por_categoria(update, context, categoria)
+
+    # Voltar (apenas fecha a mensagem)
+    elif query.data == "voltar":
+        await query.message.delete()
+
+# ============================================
+# FUNÇÃO MAIN
+# ============================================
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -310,7 +399,7 @@ def main():
     # Handler de áudio
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, processar_audio))
 
-    # Handler de callbacks
+    # Handler de callbacks (botões clicáveis)
     app.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Bot iniciado")
