@@ -105,7 +105,7 @@ async def listar_por_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('lince_transcricoes.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT t.transcricao_formatada, t.criado_em
+        SELECT t.id, t.transcricao_formatada, t.criado_em
         FROM transcricoes t
         INNER JOIN tags tg ON t.id = tg.transcricao_id
         WHERE tg.tag = ? AND t.telegram_user_id = ?
@@ -120,12 +120,34 @@ async def listar_por_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     resposta = f"📋 *Transcrições com tag '{tag}':*\n\n"
+    botoes = []
 
-    for i, (texto, data) in enumerate(resultados, 1):
-        preview = texto[:150].replace('\n', ' ') + "..."
-        resposta += f"*{i}. {data}*\n{preview}\n\n"
+    for i, (tid, texto, data) in enumerate(resultados[:10], 1):
+        # Preview de 75 caracteres, limpo de caracteres especiais
+        preview = (
+            texto[:75]
+            .replace('\n', ' ')
+            .replace('*', '')
+            .replace('_', '')
+            .replace('[', '')
+            .replace(']', '')
+            .strip()
+            + "..."
+        )
 
-    await update.message.reply_text(resposta, parse_mode='Markdown')
+        resposta += f"*{i}. ID {tid}* | {data}\n{preview}\n\n"
+
+        # Botão para ver transcrição completa
+        botoes.append([InlineKeyboardButton(f"📍 {i}. Ver transcrição completa", callback_data=f"view_{tid}")])
+
+    # Botão para fechar
+    botoes.append([InlineKeyboardButton("◀️ Fechar", callback_data="voltar")])
+
+    await update.message.reply_text(
+        resposta,
+        reply_markup=InlineKeyboardMarkup(botoes),
+        parse_mode='Markdown'
+    )
 
 async def listar_todas_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lista todas as tags disponíveis"""
@@ -317,9 +339,9 @@ async def listar_por_categoria(update: Update, context: ContextTypes.DEFAULT_TYP
     conn = sqlite3.connect('lince_transcricoes.db')
     cursor = conn.cursor()
 
-    # Buscar todas as transcrições do usuário (incluindo telegram_message_id)
+    # Buscar todas as transcrições do usuário
     cursor.execute('''
-        SELECT id, tipo_documento, criado_em, transcricao_formatada, categorias, telegram_message_id
+        SELECT id, tipo_documento, criado_em, transcricao_formatada, categorias
         FROM transcricoes
         WHERE telegram_user_id = ?
         ORDER BY criado_em DESC
@@ -330,31 +352,43 @@ async def listar_por_categoria(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Filtrar manualmente as que contêm a categoria
     resultados = []
-    for tid, tipo, data, texto, cats, msg_id in todas:
+    for tid, tipo, data, texto, cats in todas:
         if cats and categoria.lower() in cats.lower():
-            resultados.append((tid, tipo, data, texto, msg_id))
+            resultados.append((tid, tipo, data, texto))
 
     if not resultados:
         await query.answer(f"❌ Nenhuma transcrição encontrada na categoria '{categoria}'", show_alert=True)
         return
 
     resposta = f"🏷️ *Categoria: {categoria}*\n\n"
-
-    # Criar botões para cada transcrição
     botoes = []
 
-    for i, (tid, tipo, data, texto, msg_id) in enumerate(resultados[:10], 1):
-        # Remover caracteres especiais do Markdown para evitar erros
-        preview = texto[:80].replace('\n', ' ').replace('*', '').replace('_', '').replace('[', '').replace(']', '') + "..."
+    for i, (tid, tipo, data, texto) in enumerate(resultados[:10], 1):
+        # Preview de 75 caracteres, limpo de caracteres especiais
+        preview = (
+            texto[:75]
+            .replace('\n', ' ')
+            .replace('*', '')
+            .replace('_', '')
+            .replace('[', '')
+            .replace(']', '')
+            .strip()
+            + "..."
+        )
+
         resposta += f"*{i}. ID {tid}* | {tipo}\n📅 {data}\n{preview}\n\n"
 
-        # Adicionar botão "Ir para mensagem"
-        botoes.append([InlineKeyboardButton(f"📍 {i}. Ver mensagem (ID {tid})", callback_data=f"goto_{msg_id}")])
+        # Botão para ver transcrição completa
+        botoes.append([InlineKeyboardButton(f"📍 {i}. Ver transcrição completa", callback_data=f"view_{tid}")])
 
-    # Botão para voltar
-    botoes.append([InlineKeyboardButton("◀️ Voltar", callback_data="voltar")])
+    # Botão para fechar
+    botoes.append([InlineKeyboardButton("◀️ Fechar", callback_data="voltar")])
 
-    await query.message.reply_text(resposta, reply_markup=InlineKeyboardMarkup(botoes), parse_mode='Markdown')
+    await query.message.reply_text(
+        resposta,
+        reply_markup=InlineKeyboardMarkup(botoes),
+        parse_mode='Markdown'
+    )
     await query.answer()
 
 # ============================================
@@ -370,32 +404,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid = int(query.data.split("_")[1])
         trans = db.buscar_por_id(tid)
         if trans:
-            await query.message.reply_text(f"📄 *Texto completo (ID {tid}):*\n\n{trans['transcricao_formatada'][:4000]}", parse_mode='Markdown')
+            await query.message.reply_text(
+                f"📄 *Texto completo (ID {tid}):*\n\n{trans['transcricao_formatada'][:4000]}",
+                parse_mode='Markdown'
+            )
 
     # Listar por categoria
     elif query.data.startswith("cat_"):
         categoria = query.data.replace("cat_", "").replace("_", " ")
         await listar_por_categoria(update, context, categoria)
-
-    # Ir para mensagem original
-    elif query.data.startswith("goto_"):
-        msg_id = int(query.data.split("_")[1])
-        chat_id = query.message.chat_id
-
-        # Criar link para a mensagem
-        # Para chats privados, o link é: https://t.me/c/{chat_id_sem_prefixo}/{message_id}
-        if chat_id < 0:
-            # Chat de grupo/canal (remover o prefixo -100)
-            chat_id_str = str(chat_id)[4:]  # Remove "-100"
-            link = f"https://t.me/c/{chat_id_str}/{msg_id}"
-        else:
-            # Chat privado (não tem link direto, então mostra o ID)
-            await query.answer("💬 Mensagem em chat privado. Role para cima para encontrá-la.", show_alert=True)
-            return
-
-        # Criar botão com link
-        kb = [[InlineKeyboardButton("📍 Ir para mensagem", url=link)]]
-        await query.message.reply_text(f"📍 *Clique no botão abaixo para ir até a mensagem original:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     # Voltar (apenas fecha a mensagem)
     elif query.data == "voltar":
