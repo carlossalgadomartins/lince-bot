@@ -33,6 +33,7 @@ raw_ids = os.getenv("TELEGRAM_ALLOWED_IDS", "")
 ALLOWED_IDS = {int(i.strip()) for i in raw_ids.split(",") if i.strip()}
 
 def usuario_autorizado(user_id: int) -> bool:
+    """Verifica se o usuário está autorizado"""
     return user_id in ALLOWED_IDS
 
 # ============================================
@@ -40,6 +41,7 @@ def usuario_autorizado(user_id: int) -> bool:
 # ============================================
 
 def criar_tabela_tags():
+    """Cria tabela de tags (executar uma vez)"""
     conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -53,10 +55,12 @@ def criar_tabela_tags():
     """)
     conn.commit()
     conn.close()
+    print("✅ Tabela de tags criada/verificada")
 
 async def adicionar_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Adiciona tag à última transcrição"""
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado.")
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
         return
 
     tag = " ".join(context.args).strip()
@@ -93,8 +97,9 @@ async def adicionar_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Tag '{tag}' adicionada à última transcrição!")
 
 async def listar_por_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista todas as transcrições com uma tag específica"""
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado.")
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
         return
 
     tag = " ".join(context.args).strip()
@@ -144,8 +149,9 @@ async def listar_por_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def listar_todas_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista todas as tags disponíveis"""
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado.")
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
         return
 
     conn = sqlite3.connect("lince_transcricoes.db")
@@ -193,19 +199,19 @@ except Exception as e:
 
 async def start(update: Update, context):
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado.")
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
         return
     await update.message.reply_text(MENSAGENS["start"], parse_mode="Markdown")
 
 async def ajuda(update: Update, context):
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado.")
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
         return
     await update.message.reply_text(MENSAGENS["ajuda"], parse_mode="Markdown")
 
 async def processar_audio(update: Update, context):
     if not usuario_autorizado(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso negado.")
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
         return
 
     audio_path = None
@@ -213,6 +219,9 @@ async def processar_audio(update: Update, context):
         if update.message.voice:
             audio_obj = update.message.voice
             extensao = ".ogg"
+        elif update.message.audio:
+            audio_obj = update.message.audio
+            extensao = ".mp3"
         else:
             await update.message.reply_text("Envie um áudio.")
             return
@@ -231,8 +240,18 @@ async def processar_audio(update: Update, context):
             audio_path = tmp.name
         await arquivo.download_to_drive(audio_path)
 
+        if not validar_audio(audio_path, LIMITES["max_tamanho_arquivo"]):
+            await msg.edit_text("Arquivo inválido")
+            os.remove(audio_path)
+            return
+
         await msg.edit_text("Transcrevendo...")
         texto_raw = transcrever_audio_groq(audio_path)
+
+        if not texto_raw or len(texto_raw.strip()) < 10:
+            await msg.edit_text("Transcrição vazia")
+            os.remove(audio_path)
+            return
 
         texto_fmt = aplicar_pós_processamento(texto_raw)
         tipo_doc = detectar_tipo_documento(texto_fmt)
@@ -255,6 +274,9 @@ async def processar_audio(update: Update, context):
         for cat in categorias:
             cat_sanit = cat.replace(" ", "_")
             cat_line.append(InlineKeyboardButton(f"🏷️ {cat}", callback_data=f"cat_{cat_sanit}"))
+            if len(cat_line) == 3:
+                botoes.append(cat_line)
+                cat_line = []
 
         if cat_line:
             botoes.append(cat_line)
@@ -263,22 +285,50 @@ async def processar_audio(update: Update, context):
 
         await msg.delete()
 
+        prev = (texto_fmt[:250] + "...") if len(texto_fmt) > 250 else texto_fmt
         await update.message.reply_text(
-            f"✅ *Transcrição concluída*\n\n🆔 ID `{tid}`\n📋 Tipo: `{tipo_doc}`\n\n{texto_fmt[:250]}...",
+            f"✅ *Transcrição concluída*\n\n🆔 ID `{tid}`\n📋 Tipo: `{tipo_doc}`\n\n{prev}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(botoes)
         )
 
+        os.remove(audio_path)
+
     except Exception as e:
         logger.error(f"Erro processando áudio: {e}")
         await update.message.reply_text("Erro ao processar o áudio.")
-
-    finally:
         if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
 
+async def ultimas(update: Update, context):
+    if not usuario_autorizado(update.effective_user.id):
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        return
+
+    resultados = db.buscar_ultimas(limite=5)
+    if not resultados:
+        await update.message.reply_text("Nenhuma transcrição")
+        return
+    msg = "Últimas 5:\n\n"
+    for r in resultados:
+        msg += f"ID {r['id']} | {r['tipo_documento']}\n"
+    await update.message.reply_text(msg)
+
+async def categorias_cmd(update: Update, context):
+    if not usuario_autorizado(update.effective_user.id):
+        await update.message.reply_text("⛔ Acesso negado. Este bot é privado.")
+        return
+
+    msg = "Categorias:\n" + "\n".join([f"• {c}" for c in CATEGORIAS_CLINICAS.keys()])
+    await update.message.reply_text(msg)
+
 async def listar_por_categoria(update: Update, context, categoria: str):
+    """Lista todas as transcrições de uma categoria específica"""
     query = update.callback_query
+
+    if not usuario_autorizado(query.from_user.id):
+        await query.answer("⛔ Acesso negado", show_alert=True)
+        return
 
     conn = sqlite3.connect("lince_transcricoes.db")
     cursor = conn.cursor()
@@ -304,7 +354,16 @@ async def listar_por_categoria(update: Update, context, categoria: str):
     botoes = []
 
     for i, (tid, tipo, data, texto) in enumerate(resultados, start=1):
-        preview = texto[:75].replace("\n", " ").strip() + "..."
+        preview = (
+            texto[:75]
+            .replace("\n", " ")
+            .replace("*", "")
+            .replace("_", "")
+            .replace("[", "")
+            .replace("]", "")
+            .strip()
+            + "..."
+        )
         texto_msg += f"*{i}. ID {tid}* | {tipo}\n📅 {data}\n{preview}\n\n"
         botoes.append([InlineKeyboardButton(f"📍 Ver transcrição {i}", callback_data=f"view_{tid}")])
 
@@ -314,7 +373,8 @@ async def listar_por_categoria(update: Update, context, categoria: str):
     await query.answer()
 
 async def button_callback(update: Update, context):
-    query = update.callback_query  # ✅ CORRIGIDO
+    """Handler de callbacks dos botões"""
+    query = update.callback_query
     await query.answer()
 
     if query.data.startswith("view_"):
@@ -339,18 +399,27 @@ async def button_callback(update: Update, context):
 # ============================================
 
 def main():
+    if not TELEGRAM_BOT_TOKEN:
+        print("TELEGRAM_BOT_TOKEN não configurado")
+        return
+
     criar_tabela_tags()
+    print(f"✅ Bot iniciado com restrição de acesso")
+    print(f"✅ IDs autorizados: {ALLOWED_IDS}")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ajuda", ajuda))
+    app.add_handler(CommandHandler("ultimas", ultimas))
+    app.add_handler(CommandHandler("categorias", categorias_cmd))
     app.add_handler(CommandHandler("tag", adicionar_tag))
     app.add_handler(CommandHandler("listar", listar_por_tag))
     app.add_handler(CommandHandler("tags", listar_todas_tags))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, processar_audio))
     app.add_handler(CallbackQueryHandler(button_callback))
 
+    logger.info("Bot iniciado")
     app.run_polling()
 
 if __name__ == "__main__":
